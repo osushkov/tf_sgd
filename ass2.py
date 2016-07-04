@@ -10,6 +10,7 @@ from sklearn import datasets
 from six.moves.urllib.request import urlretrieve
 from six.moves import cPickle as pickle
 import matplotlib.image as mpimg
+import tensorflow as tf
 
 url = 'http://commondatastorage.googleapis.com/books1000/'
 last_percent_reported = None
@@ -186,11 +187,6 @@ def generate_train_and_test():
     train_data.shape = (train_data.shape[0], train_data.shape[1] * train_data.shape[2])
     test_data.shape = (test_data.shape[0], test_data.shape[1] * test_data.shape[2])
 
-    print "train_labels shape: " + str(train_labels.shape)
-    print "train_data shape: " + str(train_data.shape)
-    print "test_labels shape: " + str(test_labels.shape)
-    print "test_data shape: " + str(test_data.shape)
-
     pickle_file = 'notMNIST.pickle'
     try:
         f = open(pickle_file, 'wb')
@@ -208,9 +204,13 @@ def generate_train_and_test():
 
     return train_labels, train_data, test_labels, test_data
 
+def oneHotLabels(labels, num_classes):
+    return (np.arange(num_classes) == labels[:, None]).astype(np.float32)
+
 
 num_classes = 10
 np.random.seed(133)
+image_size = 28
 
 pickle_file = 'notMNIST.pickle'
 if os.path.exists(pickle_file):
@@ -224,32 +224,65 @@ if os.path.exists(pickle_file):
 else:
     train_labels, train_data, test_labels, test_data = generate_train_and_test()
 
+train_labels = oneHotLabels(train_labels, num_classes)
+test_labels = oneHotLabels(test_labels, num_classes)
 
-short_train_data = train_data[:10000]
-short_train_labels = train_labels[:10000]
+batch_size = 256
+graph = tf.Graph()
+with graph.as_default():
 
-logistic = LogisticRegression()
-print('LogisticRegression score: %f'
-      % logistic.fit(short_train_data, short_train_labels).score(test_data, test_labels))
+  tf_train_dataset = tf.placeholder(tf.float32,
+                                    shape=(batch_size, image_size * image_size))
+  tf_train_labels = tf.placeholder(tf.float32,
+                                    shape=(batch_size, num_classes))
+  tf_test_dataset = tf.constant(test_data)
 
-# print train_labels[0]
-# imgplot = plt.imshow(train_data[0])
-# plt.show()
-# raw_input("Press Enter to continue...")
+  weights_l1 = tf.Variable(
+    tf.truncated_normal([image_size * image_size, 1024]))
+  biases_l1 = tf.Variable(tf.zeros([1024]))
+  l1 = tf.nn.relu(tf.matmul(tf_train_dataset, weights_l1) + biases_l1)
 
-#valid_dataset, valid_labels, train_dataset, train_labels = \
-#    merge_datasets(train_data_filenames + test_data_filenames, 0.2)
+  weights_l2 = tf.Variable(tf.truncated_normal([1024, num_classes]))
+  biases_l2 = tf.Variable(tf.zeros([num_classes]))
+
+  logits = tf.matmul(l1, weights_l2) + biases_l2
+  loss = tf.reduce_mean(
+    tf.nn.softmax_cross_entropy_with_logits(logits, tf_train_labels))
+
+  optimizer = tf.train.AdamOptimizer().minimize(loss)
+
+  # Predictions for the training, validation, and test data.
+  # These are not part of training, but merely here so that we can report
+  # accuracy figures as we train.
+  train_prediction = tf.nn.softmax(logits)
+
+  l1_e = tf.nn.relu(tf.matmul(tf_test_dataset, weights_l1) + biases_l1)
+  test_prediction = tf.nn.softmax(tf.matmul(l1_e, weights_l2) + biases_l2)
 
 
-# train_data = []
-# for folder in train_folders:
-#     train_data.append(load_letter(folder, 100, 28, 255.0))
-#
-# test_data = []
-# for folder in test_folders:
-#     test_data.append(load_letter(folder, 100, 28, 255.0))
-#
-# assert(len(train_data) == len(test_data))
+num_steps = 10000
 
-# print "num letters: ", len(train_data)
-# for letter_data in train_data
+
+def accuracy(predictions, labels):
+  return (100.0 * np.sum(np.argmax(predictions, 1) == np.argmax(labels, 1))
+          / predictions.shape[0])
+
+with tf.Session(graph=graph) as session:
+  tf.initialize_all_variables().run()
+  print('Initialized')
+  for step in range(num_steps):
+    offset = (step * batch_size) % (train_labels.shape[0] - batch_size)
+    batch_data = train_data[offset:(offset + batch_size)]
+    batch_labels = train_labels[offset:(offset + batch_size)]
+
+    feed_dict = {
+        tf_train_dataset : batch_data,
+        tf_train_labels : batch_labels,
+    }
+
+    _, l, predictions = session.run([optimizer, loss, train_prediction], feed_dict=feed_dict)
+    if (step % 100 == 0):
+      print('Loss at step %d: %f' % (step, l))
+      print('Training accuracy: %.1f%%' % accuracy(predictions, batch_labels))
+
+  print('Test accuracy: %.1f%%' % accuracy(test_prediction.eval(), test_labels))
