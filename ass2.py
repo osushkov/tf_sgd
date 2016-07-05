@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import math
 import os
 import sys
 import tarfile
@@ -229,6 +230,11 @@ test_labels = oneHotLabels(test_labels, num_classes)
 
 batch_size = 256
 graph = tf.Graph()
+
+l1_size = 1024
+l2_size = 512
+l3_size = 256
+
 with graph.as_default():
 
   tf_train_dataset = tf.placeholder(tf.float32,
@@ -237,17 +243,32 @@ with graph.as_default():
                                     shape=(batch_size, num_classes))
   tf_test_dataset = tf.constant(test_data)
 
+  keep_prob = tf.placeholder(tf.float32)
+
   weights_l1 = tf.Variable(
-    tf.truncated_normal([image_size * image_size, 1024]))
-  biases_l1 = tf.Variable(tf.zeros([1024]))
-  l1 = tf.nn.relu(tf.matmul(tf_train_dataset, weights_l1) + biases_l1)
+    tf.truncated_normal([image_size * image_size, l1_size], stddev=(1.0/image_size)))
+  biases_l1 = tf.Variable(tf.zeros([l1_size]))
+  l1 = tf.nn.elu(tf.matmul(tf_train_dataset, weights_l1) + biases_l1)
+  l1_drop = tf.nn.dropout(l1, keep_prob)
 
-  weights_l2 = tf.Variable(tf.truncated_normal([1024, num_classes]))
-  biases_l2 = tf.Variable(tf.zeros([num_classes]))
+  weights_l2 = tf.Variable(tf.truncated_normal([l1_size, l2_size], stddev=(1.0/math.sqrt(l1_size))))
+  biases_l2 = tf.Variable(tf.zeros([l2_size]))
+  l2 = tf.nn.elu(tf.matmul(l1_drop, weights_l2) + biases_l2)
+  l2_drop = tf.nn.dropout(l2, keep_prob)
 
-  logits = tf.matmul(l1, weights_l2) + biases_l2
+  weights_l3 = tf.Variable(tf.truncated_normal([l2_size, l3_size], stddev=(1.0/math.sqrt(l2_size))))
+  biases_l3 = tf.Variable(tf.zeros([l3_size]))
+  l3 = tf.nn.elu(tf.matmul(l2_drop, weights_l3) + biases_l3)
+  l3_drop = tf.nn.dropout(l3, keep_prob)
+
+
+  weights_output = tf.Variable(tf.truncated_normal([l3_size, num_classes]))
+  biases_output = tf.Variable(tf.zeros([num_classes]))
+
+  logits = tf.matmul(l3_drop, weights_output) + biases_output
   loss = tf.reduce_mean(
-    tf.nn.softmax_cross_entropy_with_logits(logits, tf_train_labels))
+    tf.nn.softmax_cross_entropy_with_logits(logits, tf_train_labels) +
+    0.1*tf.nn.l2_loss(weights_l1) + 0.1*tf.nn.l2_loss(weights_l2) + 0.1*tf.nn.l2_loss(weights_l3))
 
   optimizer = tf.train.AdamOptimizer().minimize(loss)
 
@@ -256,9 +277,16 @@ with graph.as_default():
   # accuracy figures as we train.
   train_prediction = tf.nn.softmax(logits)
 
-  l1_e = tf.nn.relu(tf.matmul(tf_test_dataset, weights_l1) + biases_l1)
-  test_prediction = tf.nn.softmax(tf.matmul(l1_e, weights_l2) + biases_l2)
+  l1_e = tf.nn.elu(tf.matmul(tf_test_dataset, weights_l1) + biases_l1)
+  l1_e_drop = tf.nn.dropout(l1_e, keep_prob)
 
+  l2_e = tf.nn.elu(tf.matmul(l1_e, weights_l2) + biases_l2)
+  l2_e_drop = tf.nn.dropout(l2_e, keep_prob)
+
+  l3_e = tf.nn.elu(tf.matmul(l2_e, weights_l3) + biases_l3)
+  l3_e_drop = tf.nn.dropout(l3_e, keep_prob)
+
+  test_prediction = tf.nn.softmax(tf.matmul(l3_e_drop, weights_output) + biases_output)
 
 num_steps = 10000
 
@@ -278,6 +306,7 @@ with tf.Session(graph=graph) as session:
     feed_dict = {
         tf_train_dataset : batch_data,
         tf_train_labels : batch_labels,
+        keep_prob: 1.0,
     }
 
     _, l, predictions = session.run([optimizer, loss, train_prediction], feed_dict=feed_dict)
@@ -285,4 +314,4 @@ with tf.Session(graph=graph) as session:
       print('Loss at step %d: %f' % (step, l))
       print('Training accuracy: %.1f%%' % accuracy(predictions, batch_labels))
 
-  print('Test accuracy: %.1f%%' % accuracy(test_prediction.eval(), test_labels))
+  print('Test accuracy: %.1f%%' % accuracy(test_prediction.eval({keep_prob: 1.0}), test_labels))
